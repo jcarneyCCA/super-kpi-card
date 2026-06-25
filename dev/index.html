@@ -157,7 +157,7 @@
       var title = (opts.title || s.title || 'Metric');
       var delta = computeDelta(opts.primary, opts.comparison, s);
       // Highlight the two compared windows: current = dark, comparison = medium, rest = light.
-      var roleColor = { current: CCA.colors.neutralText, comparison: CCA.colors.neutralSubtitle, context: CCA.colors.neutralBorder };
+      var roleColor = { current: CCA.colors.neutralText, comparison: CCA.colors.neutralMuted, context: CCA.colors.neutralBorder };
       var colors = (opts.roles || []).map(function (r) { return roleColor[r] || CCA.colors.neutralBorder; });
       el.innerHTML =
         '<div style="position:relative;box-sizing:border-box;height:100%;width:100%;display:flex;flex-direction:column;'

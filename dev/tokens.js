@@ -18,6 +18,7 @@
     negative: '#E07830',        // semantic.negative — orange, "bad / down" (delta arrow)
     neutralText: '#333333',     // neutral.text — hero number
     neutralSubtitle: '#888888', // neutral.subtitle — caption / comparison label
+    neutralMuted: '#b0b0b0',    // comparison-window bars (mid-light gray)
     neutralLabel: '#999999',    // neutral.label
     neutralBorder: '#e0e0e0',   // neutral.border — card border
     neutralBackground: '#ffffff', // neutral.background — card bg (CCA-light)
