@@ -64,38 +64,44 @@
 
     var n = buckets.length;
     var primStart = Math.max(0, n - primaryLen);
-    var primary = aggregate(buckets.slice(primStart).map(function (b) { return b.value; }), agg);
+    var primaryIdx = [];
+    for (var pi = primStart; pi < n; pi++) primaryIdx.push(pi);
+    var primary = aggregate(primaryIdx.map(function (i) { return buckets[i].value; }), agg);
 
-    var comparison = null;
+    var comparisonIdx = [];
     if (mode === 'prior') {
-      var compEnd = primStart;
-      var compStart = Math.max(0, compEnd - primaryLen);
-      if (compEnd > compStart) {
-        comparison = aggregate(buckets.slice(compStart, compEnd).map(function (b) { return b.value; }), agg);
-      }
+      var compStart = Math.max(0, primStart - primaryLen);
+      for (var ci = compStart; ci < primStart; ci++) comparisonIdx.push(ci);
     } else { // yoy — match each primary bucket shifted back ~1 year
-      var byKey = {};
-      buckets.forEach(function (b) { byKey[b.start.getTime()] = b.value; });
-      var compVals = [];
-      buckets.slice(primStart).forEach(function (b) {
-        var prior;
+      var idxByTime = {};
+      buckets.forEach(function (b, i) { idxByTime[b.start.getTime()] = i; });
+      primaryIdx.forEach(function (i) {
+        var b = buckets[i], prior;
         if (unit === 'month') {
           prior = new Date(b.start.getFullYear() - 1, b.start.getMonth(), 1);
         } else {
           var d = new Date(b.start); d.setDate(d.getDate() - 364); prior = mondayOf(d);
         }
-        var v = byKey[prior.getTime()];
-        if (v != null) compVals.push(v);
+        var j = idxByTime[prior.getTime()];
+        if (j != null) comparisonIdx.push(j);
       });
-      if (compVals.length) comparison = aggregate(compVals, agg);
     }
+    var comparison = comparisonIdx.length
+      ? aggregate(comparisonIdx.map(function (i) { return buckets[i].value; }), agg)
+      : null;
+
+    // Per-bucket role so the card can highlight the two compared windows.
+    var roles = buckets.map(function () { return 'context'; });
+    comparisonIdx.forEach(function (i) { roles[i] = 'comparison'; });
+    primaryIdx.forEach(function (i) { roles[i] = 'current'; });
 
     return {
       unit: unit,
       values: buckets.map(function (b) { return b.value; }),
       labels: buckets.map(function (b) { return labelFor(b.start, unit); }),
       primary: primary,
-      comparison: comparison
+      comparison: comparison,
+      roles: roles
     };
   }
 

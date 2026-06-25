@@ -130,12 +130,15 @@
         + '</div>';
     }
 
-    function buildSpark(values, labels, w, h, s) {
+    function buildSpark(values, labels, colors, w, h, s) {
       if (!values || values.length < 2) return '';
       var geo = CCA.computeColumnSpark(values, { width: w, height: h, maWindow: s.maWindow, zeroBaseline: true });
       var bars = geo.bars.map(function (b) {
+        var hasC = colors && colors[b.index];
+        var fill = hasC ? colors[b.index] : CCA.colors.neutralSubtitle;
+        var op = hasC ? 1 : 0.35;
         return '<rect x="' + b.x.toFixed(2) + '" y="' + b.y.toFixed(2) + '" width="' + b.width.toFixed(2)
-          + '" height="' + b.height.toFixed(2) + '" fill="' + CCA.colors.neutralSubtitle + '" opacity="0.35" rx="0.5"/>';
+          + '" height="' + b.height.toFixed(2) + '" fill="' + fill + '" opacity="' + op + '" rx="0.5"/>';
       }).join('');
       var line = geo.linePoints.length > 1
         ? '<polyline points="' + geo.linePointsStr + '" fill="none" stroke="' + CCA.colors.brandTeal
@@ -153,6 +156,9 @@
       }
       var title = (opts.title || s.title || 'Metric');
       var delta = computeDelta(opts.primary, opts.comparison, s);
+      // Highlight the two compared windows: current = dark, comparison = medium, rest = light.
+      var roleColor = { current: CCA.colors.neutralText, comparison: CCA.colors.neutralSubtitle, context: CCA.colors.neutralBorder };
+      var colors = (opts.roles || []).map(function (r) { return roleColor[r] || CCA.colors.neutralBorder; });
       el.innerHTML =
         '<div style="position:relative;box-sizing:border-box;height:100%;width:100%;display:flex;flex-direction:column;'
         + 'justify-content:center;align-items:stretch;text-align:center;border:1px solid ' + CCA.colors.neutralBorder
@@ -163,7 +169,7 @@
         + '<div style="font-size:40px;font-weight:700;line-height:1.1;color:' + CCA.colors.neutralText + ';">'
         + formatValue(opts.primary, s) + '</div>'
         + renderDelta(delta, s)
-        + '<div style="margin-top:14px;">' + buildSpark(values, labels, 240, 44, s) + '</div>'
+        + '<div style="margin-top:14px;">' + buildSpark(values, labels, colors, 240, 44, s) + '</div>'
         + '</div>';
       var gearEl = el.querySelector('.skc-gear');
       if (gearEl) gearEl.onclick = opts.onConfigure || function () {};
@@ -274,7 +280,7 @@
         s._compLabel = compLabel(choice);
         renderCard(app, {
           title: s.title || data.title, primary: resolved.primary, comparison: resolved.comparison,
-          values: resolved.values, labels: resolved.labels, s: s, onConfigure: openConfigure
+          values: resolved.values, labels: resolved.labels, roles: resolved.roles, s: s, onConfigure: openConfigure
         });
       } catch (err) {
         app.innerHTML = '<div class="skc-msg">Could not read the worksheet data.<br>' + escapeHtml(err && err.message || '') + '</div>';
@@ -383,7 +389,7 @@
         var r = CCA.resolvePeriods(rows, Object.assign({ agg: 'sum', excludeIncomplete: true }, periodOpts));
         var s = parseSettings({ title: title, valuePrefix: '$', abbreviate: 'true' });
         s._compLabel = (periodOpts.comparisonMode === 'yoy' ? 'same period last year' : 'prior period');
-        renderCard(host(), { title: title, primary: r.primary, comparison: r.comparison, values: r.values, labels: r.labels, s: s, onConfigure: noop });
+        renderCard(host(), { title: title, primary: r.primary, comparison: r.comparison, values: r.values, labels: r.labels, roles: r.roles, s: s, onConfigure: noop });
       }
       demoCard('Revenue · Weekly (4 wk)', { unit: 'week', primaryLen: 4, comparisonMode: 'prior' });
       demoCard('Revenue · Monthly', { unit: 'month', primaryLen: 1, comparisonMode: 'prior' });
