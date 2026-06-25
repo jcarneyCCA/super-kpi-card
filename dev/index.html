@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Super KPI Card</title>
+  <style>
+    html, body { margin: 0; height: 100%; }
+    #app { height: 100%; }
+    .skc-msg {
+      height: 100%; display: flex; align-items: center; justify-content: center;
+      text-align: center; padding: 16px; color: #888888; font-size: 13px;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+    }
+    .skc-gear {
+      position: absolute; top: 8px; right: 10px; border: none; background: transparent;
+      cursor: pointer; font-size: 14px; line-height: 1; color: #999999; opacity: .4; padding: 2px;
+    }
+    .skc-gear:hover { opacity: 1; }
+    .skc-tip {
+      position: absolute; pointer-events: none; display: none; z-index: 5;
+      background: #333333; color: #fff; font-size: 11px; line-height: 1.3;
+      padding: 4px 7px; border-radius: 4px; white-space: nowrap; transform: translateY(-100%);
+    }
+    /* Dialog form */
+    .skc-dlg { font-family: 'Segoe UI', system-ui, sans-serif; color: #333; padding: 14px 18px; }
+    .skc-dlg h2 { font-size: 15px; margin: 0 0 10px; }
+    .skc-dlg h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: #1F617A; margin: 14px 0 6px; }
+    .skc-row { display: flex; flex-direction: column; margin-bottom: 9px; }
+    .skc-row label { font-size: 11px; text-transform: uppercase; letter-spacing: .4px; color: #888; margin-bottom: 3px; }
+    .skc-row input, .skc-row select { font: inherit; padding: 5px 7px; border: 1px solid #e0e0e0; border-radius: 4px; }
+    .skc-inline { display: flex; gap: 10px; }
+    .skc-inline > .skc-row { flex: 1; }
+    .skc-check { flex-direction: row; align-items: center; gap: 8px; }
+    .skc-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+    .skc-btn { font: inherit; padding: 6px 14px; border-radius: 5px; border: 1px solid #1F617A; cursor: pointer; }
+    .skc-btn-primary { background: #1F617A; color: #fff; }
+    .skc-btn-ghost { background: #fff; color: #1F617A; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+
+  <script src="./tableau.extensions.1.latest.min.js"></script>
+  <script src="./tokens.js"></script>
+  <script src="./column-spark.js"></script>
+  <script src="./periods.js"></script>
+
+  <script>
+  (function () {
+    'use strict';
+    var app = document.getElementById('app');
+
+    // ---------- settings ----------
+    function parseSettings(raw) {
+      raw = raw || {};
+      function bool(v, d) { return v == null ? d : (v === true || v === 'true'); }
+      function num(v, d) { var n = parseFloat(v); return isNaN(n) ? d : n; }
+      return {
+        title: raw.title || '',
+        aggregation: raw.aggregation || 'sum',            // 'sum' | 'average'
+        valuePrefix: raw.valuePrefix || '',
+        valueSuffix: raw.valueSuffix || '',
+        decimals: num(raw.decimals, 0),
+        abbreviate: bool(raw.abbreviate, true),
+        comparisonDisplay: raw.comparisonDisplay || 'auto', // 'auto' | 'percent' | 'points'
+        positiveDirection: raw.positiveDirection || 'up',
+        maWindow: num(raw.maWindow, 4),
+        excludeIncomplete: bool(raw.excludeIncomplete != null ? raw.excludeIncomplete : raw.excludePartialWeek, true),
+        // Names of the native Tableau parameters the card reads (user-driven controls).
+        granularityParam: raw.granularityParam || 'Granularity',
+        windowParam: raw.windowParam || 'Periods',
+        comparisonParam: raw.comparisonParam || 'Comparison Type',
+        // Static fallbacks used when a parameter isn't found.
+        unit: raw.unit || 'week',                          // 'week' | 'month'
+        primaryLen: num(raw.primaryLen != null ? raw.primaryLen : raw.windowWeeks, 4),
+        comparisonMode: raw.comparisonMode || 'prior'       // 'prior' | 'yoy'
+      };
+    }
+
+    // ---------- formatting ----------
+    function abbreviateNum(v, decimals) {
+      var a = Math.abs(v);
+      if (a >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+      if (a >= 1e3) return (v / 1e3).toFixed(1) + 'K';
+      return v.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+    }
+    function formatValue(v, s) {
+      var core = s.abbreviate
+        ? abbreviateNum(v, s.decimals)
+        : v.toLocaleString(undefined, { minimumFractionDigits: s.decimals, maximumFractionDigits: s.decimals });
+      return (s.valuePrefix || '') + core + (s.valueSuffix || '');
+    }
+    function escapeHtml(str) {
+      return String(str).replace(/[&<>"]/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+      });
+    }
+
+    // ---------- comparison display ----------
+    function computeDelta(primary, comparison, s) {
+      if (comparison == null) return null;
+      var mode = s.comparisonDisplay;
+      if (mode === 'auto') mode = s.aggregation === 'average' ? 'points' : 'percent';
+      if (mode === 'percent') {
+        return { kind: 'percent', value: comparison !== 0 ? (primary - comparison) / Math.abs(comparison) * 100 : null };
+      }
+      return { kind: 'points', value: primary - comparison };
+    }
+    function renderDelta(delta, s) {
+      if (!delta || delta.value == null) return '';
+      var isPos = delta.value >= 0;
+      var isGood = s.positiveDirection === 'up' ? isPos : !isPos;
+      var color = isGood ? CCA.colors.positive : CCA.colors.negative;
+      var arrow = isPos ? '▲' : '▼';
+      var txt;
+      if (delta.kind === 'percent') {
+        txt = (isPos ? '+' : '') + delta.value.toFixed(1) + '%';
+      } else {
+        var mag = Math.abs(delta.value);
+        var magStr = (s.valueSuffix === '%')
+          ? mag.toFixed(s.decimals > 0 ? s.decimals : 1) + ' pts'
+          : formatValue(mag, { valuePrefix: s.valuePrefix, valueSuffix: s.valueSuffix, decimals: s.decimals, abbreviate: s.abbreviate });
+        txt = (isPos ? '+' : '−') + magStr;
+      }
+      return '<div style="margin-top:8px;font-size:12px;display:flex;gap:6px;justify-content:center;align-items:center;">'
+        + '<span style="color:' + color + ';font-size:9px;">' + arrow + '</span>'
+        + '<span style="color:' + color + ';font-weight:600;">' + txt + '</span>'
+        + '<span style="color:' + CCA.colors.neutralSubtitle + ';">vs ' + escapeHtml(s._compLabel || 'prior period') + '</span>'
+        + '</div>';
+    }
+
+    function buildSpark(values, labels, w, h, s) {
+      if (!values || values.length < 2) return '';
+      var geo = CCA.computeColumnSpark(values, { width: w, height: h, maWindow: s.maWindow, zeroBaseline: true });
+      var bars = geo.bars.map(function (b) {
+        return '<rect x="' + b.x.toFixed(2) + '" y="' + b.y.toFixed(2) + '" width="' + b.width.toFixed(2)
+          + '" height="' + b.height.toFixed(2) + '" fill="' + CCA.colors.neutralSubtitle + '" opacity="0.35" rx="0.5"/>';
+      }).join('');
+      var line = geo.linePoints.length > 1
+        ? '<polyline points="' + geo.linePointsStr + '" fill="none" stroke="' + CCA.colors.brandTeal
+          + '" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>'
+        : '';
+      return '<svg width="100%" height="' + h + '" viewBox="0 0 ' + w + ' ' + h
+        + '" preserveAspectRatio="none" style="display:block;overflow:visible">' + bars + line + '</svg>';
+    }
+
+    function renderCard(el, opts) {
+      var s = opts.s, values = opts.values || [], labels = opts.labels || null;
+      if (!values.length || opts.primary == null) {
+        el.innerHTML = '<div class="skc-msg">Add a measure (and a date) to this card.</div>';
+        return;
+      }
+      var title = (opts.title || s.title || 'Metric');
+      var delta = computeDelta(opts.primary, opts.comparison, s);
+      el.innerHTML =
+        '<div style="position:relative;box-sizing:border-box;height:100%;width:100%;display:flex;flex-direction:column;'
+        + 'justify-content:center;align-items:stretch;text-align:center;border:1px solid ' + CCA.colors.neutralBorder
+        + ';border-radius:8px;background:' + CCA.colors.neutralBackground + ';padding:16px 20px;font-family:' + CCA.fonts.ui + ';">'
+        + '<button class="skc-gear" title="Card settings" aria-label="Card settings">⚙</button>'
+        + '<div style="font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:' + CCA.colors.neutralSubtitle + ';margin-bottom:6px;">'
+        + escapeHtml(title) + '</div>'
+        + '<div style="font-size:40px;font-weight:700;line-height:1.1;color:' + CCA.colors.neutralText + ';">'
+        + formatValue(opts.primary, s) + '</div>'
+        + renderDelta(delta, s)
+        + '<div style="margin-top:14px;">' + buildSpark(values, labels, 240, 44, s) + '</div>'
+        + '</div>';
+      var gearEl = el.querySelector('.skc-gear');
+      if (gearEl) gearEl.onclick = opts.onConfigure || function () {};
+
+      // Custom hover tooltip — native <title> is unreliable in Tableau's embedded browser.
+      var cardDiv = el.firstElementChild;
+      var svg = el.querySelector('svg');
+      if (cardDiv && svg && values.length) {
+        var tips = values.map(function (v, i) {
+          return (labels && labels[i] ? labels[i] + ' · ' : '') + formatValue(v, s);
+        });
+        var tipEl = document.createElement('div');
+        tipEl.className = 'skc-tip';
+        cardDiv.appendChild(tipEl);
+        var SP_W = 240, SP_PAD = 2, n = tips.length, slot = (SP_W - SP_PAD * 2) / n;
+        svg.addEventListener('mousemove', function (e) {
+          var sr = svg.getBoundingClientRect();
+          if (!sr.width) return;
+          var userX = (e.clientX - sr.left) * (SP_W / sr.width);
+          var i = Math.max(0, Math.min(n - 1, Math.floor((userX - SP_PAD) / slot)));
+          tipEl.textContent = tips[i];
+          tipEl.style.display = 'block';
+          var cr = cardDiv.getBoundingClientRect();
+          tipEl.style.left = (e.clientX - cr.left + 8) + 'px';
+          tipEl.style.top = (e.clientY - cr.top - 6) + 'px';
+        });
+        svg.addEventListener('mouseleave', function () { tipEl.style.display = 'none'; });
+      }
+    }
+
+    // ---------- Tableau worksheet mode ----------
+    var worksheet = null;
+
+    function openConfigure() {
+      var url = location.origin + location.pathname + '?dialog=1';
+      tableau.extensions.ui.displayDialogAsync(url, '', { width: 380, height: 640 })
+        .then(function () { renderFromTableau(); })
+        .catch(function () { /* dialog dismissed — ignore */ });
+    }
+
+    // Day-level series: one row per date at whatever grain is on the shelf (DAY recommended).
+    // resolvePeriods does the bucketing — so the card never pre-aggregates here.
+    async function loadSeries() {
+      var measureName = null, dateName = null;
+      try {
+        var spec = await worksheet.getVisualSpecificationAsync();
+        var marks = spec.marksSpecifications || [];
+        var encs = (marks[0] && marks[0].encodings) || [];
+        encs.forEach(function (e) {
+          var fname = e.field && (e.field.name || e.field.fieldName || e.fieldName);
+          if (e.id === 'measure') measureName = fname;
+          if (e.id === 'date') dateName = fname;
+        });
+      } catch (err) { /* fall back to column dataType below */ }
+
+      var dt = await worksheet.getSummaryDataAsync({ maxRows: 20000, ignoreSelection: true });
+      var cols = dt.columns, dateIdx = -1, measIdx = -1;
+      for (var i = 0; i < cols.length; i++) {
+        if (measureName && cols[i].fieldName === measureName) measIdx = i;
+        if (dateName && cols[i].fieldName === dateName) dateIdx = i;
+      }
+      if (measIdx < 0 || dateIdx < 0) {
+        for (var j = 0; j < cols.length; j++) {
+          var t = cols[j].dataType;
+          if (dateIdx < 0 && (t === 'date' || t === 'date-time')) dateIdx = j;
+          if (measIdx < 0 && (t === 'float' || t === 'int')) measIdx = j;
+        }
+      }
+      if (measIdx < 0 || dateIdx < 0) return { title: '', rows: [] };
+      var rows = dt.data.map(function (r) {
+        return { date: new Date(r[dateIdx].value), value: Number(r[measIdx].value) };
+      }).filter(function (x) { return !isNaN(x.value) && x.date && !isNaN(x.date.getTime()); });
+      return { title: cols[measIdx].fieldName, rows: rows };
+    }
+
+    // Read the user's choices from native parameters (by configured name); fall back to gear defaults.
+    async function readPeriodChoices(s) {
+      var choice = { unit: s.unit, primaryLen: s.primaryLen, mode: s.comparisonMode };
+      try {
+        var params = await worksheet.getParametersAsync();
+        function valOf(name) {
+          var p = params.filter(function (x) { return x.name === name; })[0];
+          if (!p || !p.currentValue) return null;
+          return p.currentValue.value != null ? p.currentValue.value : p.currentValue.formattedValue;
+        }
+        var g = valOf(s.granularityParam); if (g != null) choice.unit = /month/i.test(String(g)) ? 'month' : 'week';
+        var w = valOf(s.windowParam); if (w != null) { var nn = parseInt(String(w), 10); if (!isNaN(nn)) choice.primaryLen = nn; }
+        var c = valOf(s.comparisonParam); if (c != null) choice.mode = /year|yoy|last\s*year/i.test(String(c)) ? 'yoy' : 'prior';
+      } catch (e) { /* parameters unavailable — defaults stand */ }
+      return choice;
+    }
+
+    function compLabel(choice) {
+      var unitWord = choice.unit === 'month' ? (choice.primaryLen > 1 ? 'months' : 'month') : (choice.primaryLen > 1 ? 'weeks' : 'week');
+      return choice.mode === 'yoy' ? 'same ' + choice.primaryLen + ' ' + unitWord + ' last year'
+        : 'prior ' + choice.primaryLen + ' ' + unitWord;
+    }
+
+    async function renderFromTableau() {
+      var s = parseSettings(tableau.extensions.settings.getAll());
+      try {
+        var choice = await readPeriodChoices(s);
+        var data = await loadSeries();
+        var resolved = CCA.resolvePeriods(data.rows, {
+          unit: choice.unit, primaryLen: choice.primaryLen, comparisonMode: choice.mode,
+          agg: s.aggregation, excludeIncomplete: s.excludeIncomplete
+        });
+        s._compLabel = compLabel(choice);
+        renderCard(app, {
+          title: s.title || data.title, primary: resolved.primary, comparison: resolved.comparison,
+          values: resolved.values, labels: resolved.labels, s: s, onConfigure: openConfigure
+        });
+      } catch (err) {
+        app.innerHTML = '<div class="skc-msg">Could not read the worksheet data.<br>' + escapeHtml(err && err.message || '') + '</div>';
+      }
+    }
+
+    async function initViz() {
+      await tableau.extensions.initializeAsync({ configure: openConfigure });
+      worksheet = tableau.extensions.worksheetContent.worksheet;
+      worksheet.addEventListener(tableau.TableauEventType.SummaryDataChanged, renderFromTableau);
+      tableau.extensions.settings.addEventListener(tableau.TableauEventType.SettingsChanged, renderFromTableau);
+      // Re-render when any workbook parameter changes (we map by name at render time).
+      try {
+        var params = await worksheet.getParametersAsync();
+        params.forEach(function (p) { p.addEventListener(tableau.TableauEventType.ParameterChanged, renderFromTableau); });
+      } catch (e) { /* parameters not supported here — card still works on its defaults */ }
+      renderFromTableau();
+    }
+
+    // ---------- settings dialog ----------
+    async function initDialog() {
+      await tableau.extensions.initializeDialogAsync();
+      var s = parseSettings(tableau.extensions.settings.getAll());
+      function opt(v, cur, lbl) { return '<option value="' + v + '"' + (cur === v ? ' selected' : '') + '>' + lbl + '</option>'; }
+      app.innerHTML =
+        '<div class="skc-dlg">'
+        + '<h2>Card settings</h2>'
+        + '<div class="skc-row"><label>Title (blank = field name)</label><input id="f-title" value="' + escapeHtml(s.title) + '"></div>'
+
+        + '<h3>Parameters (user controls)</h3>'
+        + '<div class="skc-row"><label>Granularity parameter name</label><input id="f-pgran" value="' + escapeHtml(s.granularityParam) + '"></div>'
+        + '<div class="skc-inline">'
+        + '<div class="skc-row"><label>Window param</label><input id="f-pwin" value="' + escapeHtml(s.windowParam) + '"></div>'
+        + '<div class="skc-row"><label>Comparison param</label><input id="f-pcmp" value="' + escapeHtml(s.comparisonParam) + '"></div>'
+        + '</div>'
+
+        + '<h3>Defaults (when no parameter)</h3>'
+        + '<div class="skc-inline">'
+        + '<div class="skc-row"><label>Granularity</label><select id="f-unit">' + opt('week', s.unit, 'Week') + opt('month', s.unit, 'Month') + '</select></div>'
+        + '<div class="skc-row"><label>Window (N)</label><input id="f-len" type="number" min="1" max="24" value="' + s.primaryLen + '"></div>'
+        + '<div class="skc-row"><label>Comparison</label><select id="f-mode">' + opt('prior', s.comparisonMode, 'Prior period') + opt('yoy', s.comparisonMode, 'Same period last year') + '</select></div>'
+        + '</div>'
+
+        + '<h3>Format</h3>'
+        + '<div class="skc-row"><label>Aggregation</label><select id="f-agg">' + opt('sum', s.aggregation, 'Sum (dollars, volume, counts)') + opt('average', s.aggregation, 'Average (rates, percentages)') + '</select></div>'
+        + '<div class="skc-inline">'
+        + '<div class="skc-row"><label>Prefix</label><input id="f-prefix" value="' + escapeHtml(s.valuePrefix) + '" placeholder="$"></div>'
+        + '<div class="skc-row"><label>Suffix</label><input id="f-suffix" value="' + escapeHtml(s.valueSuffix) + '" placeholder="%"></div>'
+        + '<div class="skc-row"><label>Decimals</label><input id="f-dec" type="number" min="0" max="4" value="' + s.decimals + '"></div>'
+        + '</div>'
+        + '<div class="skc-row skc-check"><input id="f-abbr" type="checkbox"' + (s.abbreviate ? ' checked' : '') + '><label style="text-transform:none;letter-spacing:0;">Abbreviate large numbers ($48.2K)</label></div>'
+        + '<div class="skc-row skc-check"><input id="f-partial" type="checkbox"' + (s.excludeIncomplete ? ' checked' : '') + '><label style="text-transform:none;letter-spacing:0;">Exclude current partial period</label></div>'
+        + '<div class="skc-row"><label>Good direction</label><select id="f-dir">' + opt('up', s.positiveDirection, 'Up is good') + opt('down', s.positiveDirection, 'Down is good') + '</select></div>'
+
+        + '<div class="skc-actions">'
+        + '<button class="skc-btn skc-btn-ghost" id="f-cancel">Cancel</button>'
+        + '<button class="skc-btn skc-btn-primary" id="f-save">Save</button>'
+        + '</div>'
+        + '</div>';
+
+      document.getElementById('f-cancel').onclick = function () { tableau.extensions.ui.closeDialog('cancel'); };
+      document.getElementById('f-save').onclick = async function () {
+        var st = tableau.extensions.settings, g = function (id) { return document.getElementById(id); };
+        st.set('title', g('f-title').value);
+        st.set('granularityParam', g('f-pgran').value);
+        st.set('windowParam', g('f-pwin').value);
+        st.set('comparisonParam', g('f-pcmp').value);
+        st.set('unit', g('f-unit').value);
+        st.set('primaryLen', g('f-len').value);
+        st.set('comparisonMode', g('f-mode').value);
+        st.set('aggregation', g('f-agg').value);
+        st.set('valuePrefix', g('f-prefix').value);
+        st.set('valueSuffix', g('f-suffix').value);
+        st.set('decimals', g('f-dec').value);
+        st.set('abbreviate', g('f-abbr').checked ? 'true' : 'false');
+        st.set('excludeIncomplete', g('f-partial').checked ? 'true' : 'false');
+        st.set('positiveDirection', g('f-dir').value);
+        await st.saveAsync();
+        tableau.extensions.ui.closeDialog('saved');
+      };
+    }
+
+    // ---------- standalone demo (verification without Tableau) ----------
+    function renderDemo() {
+      document.body.style.cssText = 'margin:0;background:#f4f5f7;padding:24px;font-family:' + CCA.fonts.ui + ';';
+      app.innerHTML = '<div style="font-weight:600;font-size:14px;color:#555;margin-bottom:16px;">'
+        + 'Super KPI Card &mdash; standalone demo (same day-level data, different period settings)</div>'
+        + '<div id="demo-row" style="display:flex;gap:20px;flex-wrap:wrap;"></div>';
+      var row = document.getElementById('demo-row');
+      function host() { var d = document.createElement('div'); d.style.cssText = 'width:280px;height:200px;'; row.appendChild(d); return d; }
+
+      // ~14 months of deterministic daily revenue: upward trend + weekend lift.
+      var rows = [];
+      var end = new Date(); end.setDate(end.getDate() - 3);
+      var start = new Date(end); start.setMonth(start.getMonth() - 14);
+      for (var d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+        var dow = d.getDay();
+        var weekend = (dow === 0 || dow === 6) ? 1.35 : 1.0;
+        var monthsIn = (d.getFullYear() - start.getFullYear()) * 12 + (d.getMonth() - start.getMonth());
+        var val = Math.round(1500 * weekend * (1 + monthsIn * 0.03));
+        rows.push({ date: new Date(d), value: val });
+      }
+      var noop = function () { console.log('[Super KPI Card] Settings open via the gear inside Tableau.'); };
+
+      function demoCard(title, periodOpts) {
+        var r = CCA.resolvePeriods(rows, Object.assign({ agg: 'sum', excludeIncomplete: true }, periodOpts));
+        var s = parseSettings({ title: title, valuePrefix: '$', abbreviate: 'true' });
+        s._compLabel = (periodOpts.comparisonMode === 'yoy' ? 'same period last year' : 'prior period');
+        renderCard(host(), { title: title, primary: r.primary, comparison: r.comparison, values: r.values, labels: r.labels, s: s, onConfigure: noop });
+      }
+      demoCard('Revenue · Weekly (4 wk)', { unit: 'week', primaryLen: 4, comparisonMode: 'prior' });
+      demoCard('Revenue · Monthly', { unit: 'month', primaryLen: 1, comparisonMode: 'prior' });
+      demoCard('Revenue · Month vs LY', { unit: 'month', primaryLen: 1, comparisonMode: 'yoy' });
+    }
+
+    // ---------- mode dispatch ----------
+    var params = new URLSearchParams(location.search);
+    var hasTableau = typeof tableau !== 'undefined' && tableau.extensions;
+    var inIframe = window.self !== window.top;
+    if (params.get('dialog') === '1' && hasTableau) {
+      initDialog();
+    } else if (params.get('demo') === '1') {
+      renderDemo();
+    } else if (hasTableau && inIframe) {
+      initViz();
+    } else {
+      renderDemo();
+    }
+  })();
+  </script>
+</body>
+</html>
