@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Super KPI Card</title>
+  <style>
+    html, body { margin: 0; height: 100%; }
+    #app { height: 100%; }
+    .skc-msg {
+      height: 100%; display: flex; align-items: center; justify-content: center;
+      text-align: center; padding: 16px; color: #888888; font-size: 13px;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+    }
+    /* In-card settings gear (our own trigger — Tableau doesn't reliably surface
+       a configure entry for viz extensions). */
+    .skc-gear {
+      position: absolute; top: 8px; right: 10px; border: none; background: transparent;
+      cursor: pointer; font-size: 14px; line-height: 1; color: #999999; opacity: .4; padding: 2px;
+    }
+    .skc-gear:hover { opacity: 1; }
+    .skc-tip {
+      position: absolute; pointer-events: none; display: none; z-index: 5;
+      background: #333333; color: #fff; font-size: 11px; line-height: 1.3;
+      padding: 4px 7px; border-radius: 4px; white-space: nowrap; transform: translateY(-100%);
+    }
+    /* Dialog form */
+    .skc-dlg { font-family: 'Segoe UI', system-ui, sans-serif; color: #333; padding: 16px 18px; }
+    .skc-dlg h2 { font-size: 15px; margin: 0 0 12px; }
+    .skc-row { display: flex; flex-direction: column; margin-bottom: 10px; }
+    .skc-row label { font-size: 11px; text-transform: uppercase; letter-spacing: .4px; color: #888; margin-bottom: 3px; }
+    .skc-row input, .skc-row select { font: inherit; padding: 5px 7px; border: 1px solid #e0e0e0; border-radius: 4px; }
+    .skc-inline { display: flex; gap: 10px; }
+    .skc-inline > .skc-row { flex: 1; }
+    .skc-check { flex-direction: row; align-items: center; gap: 8px; }
+    .skc-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+    .skc-btn { font: inherit; padding: 6px 14px; border-radius: 5px; border: 1px solid #1F617A; cursor: pointer; }
+    .skc-btn-primary { background: #1F617A; color: #fff; }
+    .skc-btn-ghost { background: #fff; color: #1F617A; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+
+  <!-- Tableau Extensions API — vendored locally (the CDN path 404s). -->
+  <script src="./tableau.extensions.1.latest.min.js"></script>
+  <!-- CCA tokens + shared geometry + week helpers (vendored from @cca/viz). -->
+  <script src="./tokens.js"></script>
+  <script src="./column-spark.js"></script>
+  <script src="./weeks.js"></script>
+
+  <script>
+  (function () {
+    'use strict';
+    var app = document.getElementById('app');
+
+    // ---------- settings ----------
+    function parseSettings(raw) {
+      raw = raw || {};
+      function bool(v, d) { return v == null ? d : (v === true || v === 'true'); }
+      function num(v, d) { var n = parseFloat(v); return isNaN(n) ? d : n; }
+      return {
+        title: raw.title || '',
+        aggregation: raw.aggregation || 'sum',            // 'sum' | 'average'
+        valuePrefix: raw.valuePrefix || '',
+        valueSuffix: raw.valueSuffix || '',
+        decimals: num(raw.decimals, 0),
+        abbreviate: bool(raw.abbreviate, true),
+        comparisonDisplay: raw.comparisonDisplay || 'auto', // 'auto' | 'percent' | 'points'
+        positiveDirection: raw.positiveDirection || 'up',   // 'up' | 'down'
+        windowWeeks: num(raw.windowWeeks, 4),
+        maWindow: num(raw.maWindow, 4),
+        excludePartialWeek: bool(raw.excludePartialWeek, true) // CCA complete-weeks rule, on by default
+      };
+    }
+
+    // ---------- formatting ----------
+    function abbreviateNum(v, decimals) {
+      var a = Math.abs(v);
+      if (a >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+      if (a >= 1e3) return (v / 1e3).toFixed(1) + 'K';
+      return v.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+    }
+    function formatValue(v, s) {
+      var core = s.abbreviate
+        ? abbreviateNum(v, s.decimals)
+        : v.toLocaleString(undefined, { minimumFractionDigits: s.decimals, maximumFractionDigits: s.decimals });
+      return (s.valuePrefix || '') + core + (s.valueSuffix || '');
+    }
+    function formatWeekLabel(d) {
+      try { return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); }
+      catch (e) { return ''; }
+    }
+    function escapeHtml(str) {
+      return String(str).replace(/[&<>"]/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+      });
+    }
+
+    // ---------- card math ----------
+    function aggregate(arr, mode) {
+      if (!arr.length) return 0;
+      var sum = arr.reduce(function (a, b) { return a + b; }, 0);
+      return mode === 'average' ? sum / arr.length : sum;
+    }
+    function computeCard(values, s) {
+      var w = s.windowWeeks;
+      var cur = values.slice(-w);
+      var prior = values.length >= 2 * w ? values.slice(-2 * w, -w) : [];
+      var hero = aggregate(cur, s.aggregation);
+      var prevAgg = prior.length ? aggregate(prior, s.aggregation) : null;
+      var delta = null;
+      if (prevAgg != null) {
+        var mode = s.comparisonDisplay;
+        if (mode === 'auto') mode = s.aggregation === 'average' ? 'points' : 'percent';
+        if (mode === 'percent') {
+          delta = { kind: 'percent', value: prevAgg !== 0 ? (hero - prevAgg) / Math.abs(prevAgg) * 100 : null };
+        } else {
+          delta = { kind: 'points', value: hero - prevAgg };
+        }
+      }
+      return { hero: hero, prevAgg: prevAgg, delta: delta };
+    }
+
+    // ---------- render ----------
+    function renderDelta(delta, s) {
+      if (!delta || delta.value == null) return '';
+      var isPos = delta.value >= 0;
+      var isGood = s.positiveDirection === 'up' ? isPos : !isPos;
+      var color = isGood ? CCA.colors.positive : CCA.colors.negative;
+      var arrow = isPos ? '▲' : '▼';
+      var txt;
+      if (delta.kind === 'percent') {
+        txt = (isPos ? '+' : '') + delta.value.toFixed(1) + '%';
+      } else {
+        var mag = Math.abs(delta.value);
+        var magStr = (s.valueSuffix === '%')
+          ? mag.toFixed(s.decimals > 0 ? s.decimals : 1) + ' pts'
+          : formatValue(mag, { valuePrefix: s.valuePrefix, valueSuffix: s.valueSuffix, decimals: s.decimals, abbreviate: s.abbreviate });
+        txt = (isPos ? '+' : '−') + magStr;
+      }
+      return '<div style="margin-top:8px;font-size:12px;display:flex;gap:6px;justify-content:center;align-items:center;">'
+        + '<span style="color:' + color + ';font-size:9px;">' + arrow + '</span>'
+        + '<span style="color:' + color + ';font-weight:600;">' + txt + '</span>'
+        + '<span style="color:' + CCA.colors.neutralSubtitle + ';">vs prior ' + s.windowWeeks + ' weeks</span>'
+        + '</div>';
+    }
+
+    function buildSpark(values, weeks, w, h, s) {
+      if (!values || values.length < 2) return '';
+      var geo = CCA.computeColumnSpark(values, { width: w, height: h, maWindow: s.maWindow, zeroBaseline: true });
+      var bars = geo.bars.map(function (b) {
+        return '<rect x="' + b.x.toFixed(2) + '" y="' + b.y.toFixed(2) + '" width="' + b.width.toFixed(2)
+          + '" height="' + b.height.toFixed(2) + '" fill="' + CCA.colors.neutralSubtitle + '" opacity="0.35" rx="0.5"/>';
+      }).join('');
+      var line = geo.linePoints.length > 1
+        ? '<polyline points="' + geo.linePointsStr + '" fill="none" stroke="' + CCA.colors.brandTeal
+          + '" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>'
+        : '';
+      return '<svg width="100%" height="' + h + '" viewBox="0 0 ' + w + ' ' + h
+        + '" preserveAspectRatio="none" style="display:block;overflow:visible">' + bars + line + '</svg>';
+    }
+
+    function renderCard(el, opts) {
+      var s = opts.s, values = opts.values || [], weeks = opts.weeks || null;
+      if (!values.length) {
+        el.innerHTML = '<div class="skc-msg">Add a measure to this card.</div>';
+        return;
+      }
+      var c = computeCard(values, s);
+      var title = (opts.title || s.title || 'Metric');
+      el.innerHTML =
+        '<div style="position:relative;box-sizing:border-box;height:100%;width:100%;display:flex;flex-direction:column;'
+        + 'justify-content:center;align-items:stretch;text-align:center;border:1px solid ' + CCA.colors.neutralBorder
+        + ';border-radius:8px;background:' + CCA.colors.neutralBackground + ';padding:16px 20px;font-family:' + CCA.fonts.ui + ';">'
+        + '<button class="skc-gear" title="Card settings" aria-label="Card settings">⚙</button>'
+        + '<div style="font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:' + CCA.colors.neutralSubtitle + ';margin-bottom:6px;">'
+        + escapeHtml(title) + '</div>'
+        + '<div style="font-size:40px;font-weight:700;line-height:1.1;color:' + CCA.colors.neutralText + ';">'
+        + formatValue(c.hero, s) + '</div>'
+        + renderDelta(c.delta, s)
+        + '<div style="margin-top:14px;">' + buildSpark(values, weeks, 240, 44, s) + '</div>'
+        + '</div>';
+      var gearEl = el.querySelector('.skc-gear');
+      if (gearEl) gearEl.onclick = opts.onConfigure || function () {};
+
+      // Custom hover tooltip — native SVG <title> is unreliable in Tableau's embedded browser.
+      var cardDiv = el.firstElementChild;
+      var svg = el.querySelector('svg');
+      if (cardDiv && svg && values.length) {
+        var tips = values.map(function (v, i) {
+          return (weeks && weeks[i] ? 'Week of ' + weeks[i] + ' · ' : '') + formatValue(v, s);
+        });
+        var tipEl = document.createElement('div');
+        tipEl.className = 'skc-tip';
+        cardDiv.appendChild(tipEl);
+        var SP_W = 240, SP_PAD = 2, n = tips.length, slot = (SP_W - SP_PAD * 2) / n;
+        svg.addEventListener('mousemove', function (e) {
+          var sr = svg.getBoundingClientRect();
+          if (!sr.width) return;
+          var userX = (e.clientX - sr.left) * (SP_W / sr.width);
+          var i = Math.max(0, Math.min(n - 1, Math.floor((userX - SP_PAD) / slot)));
+          tipEl.textContent = tips[i];
+          tipEl.style.display = 'block';
+          var cr = cardDiv.getBoundingClientRect();
+          tipEl.style.left = (e.clientX - cr.left + 8) + 'px';
+          tipEl.style.top = (e.clientY - cr.top - 6) + 'px';
+        });
+        svg.addEventListener('mouseleave', function () { tipEl.style.display = 'none'; });
+      }
+    }
+
+    // ---------- Tableau worksheet mode ----------
+    var worksheet = null;
+
+    function openConfigure() {
+      var url = location.origin + location.pathname + '?dialog=1';
+      tableau.extensions.ui.displayDialogAsync(url, '', { width: 360, height: 560 })
+        .then(function () { renderFromTableau(); })
+        .catch(function () { /* user dismissed dialog — DialogClosedException — ignore */ });
+    }
+
+    // Best-effort adapter: assumes Tableau aggregated to one row per week (Week date
+    // on the encoding shelf). Validated in Tableau Desktop 2026-06-25 (Superstore).
+    async function loadWeeklyValues(s) {
+      var measureName = null, dateName = null;
+      try {
+        var spec = await worksheet.getVisualSpecificationAsync();
+        var marks = spec.marksSpecifications || [];
+        var encs = (marks[0] && marks[0].encodings) || [];
+        encs.forEach(function (e) {
+          var fname = e.field && (e.field.name || e.field.fieldName || e.fieldName);
+          if (e.id === 'measure') measureName = fname;
+          if (e.id === 'date') dateName = fname;
+        });
+      } catch (err) { /* fall back to column dataType below */ }
+
+      var dt = await worksheet.getSummaryDataAsync({ maxRows: 5000, ignoreSelection: true });
+      var cols = dt.columns, dateIdx = -1, measIdx = -1;
+      for (var i = 0; i < cols.length; i++) {
+        if (measureName && cols[i].fieldName === measureName) measIdx = i;
+        if (dateName && cols[i].fieldName === dateName) dateIdx = i;
+      }
+      if (measIdx < 0 || dateIdx < 0) {
+        for (var j = 0; j < cols.length; j++) {
+          var t = cols[j].dataType;
+          if (dateIdx < 0 && (t === 'date' || t === 'date-time')) dateIdx = j;
+          if (measIdx < 0 && (t === 'float' || t === 'int')) measIdx = j;
+        }
+      }
+      if (measIdx < 0) return { title: '', values: [], weeks: [] };
+
+      var rows = dt.data.map(function (r) {
+        var raw = dateIdx >= 0 ? r[dateIdx].value : null;
+        return { date: raw != null ? new Date(raw) : null, value: Number(r[measIdx].value) };
+      }).filter(function (x) { return !isNaN(x.value); });
+
+      if (dateIdx >= 0) {
+        rows = rows.filter(function (x) { return x.date && !isNaN(x.date.getTime()); });
+        rows.sort(function (a, b) { return a.date - b.date; });
+        // CCA complete-weeks rule: drop the in-progress (partial) Monday-start week.
+        if (s.excludePartialWeek) rows = CCA.excludeIncompleteWeek(rows, new Date());
+      }
+      return {
+        title: cols[measIdx].fieldName,
+        values: rows.map(function (x) { return x.value; }),
+        weeks: rows.map(function (x) { return x.date ? formatWeekLabel(CCA.mondayOf(x.date)) : ''; })
+      };
+    }
+
+    async function renderFromTableau() {
+      var s = parseSettings(tableau.extensions.settings.getAll());
+      try {
+        var data = await loadWeeklyValues(s);
+        renderCard(app, { title: s.title || data.title, values: data.values, weeks: data.weeks, s: s, onConfigure: openConfigure });
+      } catch (err) {
+        app.innerHTML = '<div class="skc-msg">Could not read the worksheet data.<br>' + escapeHtml(err && err.message || '') + '</div>';
+      }
+    }
+
+    async function initViz() {
+      await tableau.extensions.initializeAsync({ configure: openConfigure });
+      worksheet = tableau.extensions.worksheetContent.worksheet;
+      worksheet.addEventListener(tableau.TableauEventType.SummaryDataChanged, renderFromTableau);
+      tableau.extensions.settings.addEventListener(tableau.TableauEventType.SettingsChanged, renderFromTableau);
+      renderFromTableau();
+    }
+
+    // ---------- settings dialog ----------
+    async function initDialog() {
+      await tableau.extensions.initializeDialogAsync();
+      var s = parseSettings(tableau.extensions.settings.getAll());
+      app.innerHTML =
+        '<div class="skc-dlg">'
+        + '<h2>Card settings</h2>'
+        + '<div class="skc-row"><label>Title (blank = field name)</label><input id="f-title" value="' + escapeHtml(s.title) + '"></div>'
+        + '<div class="skc-row"><label>Aggregation (hero number)</label><select id="f-agg">'
+        + '<option value="sum"' + (s.aggregation === 'sum' ? ' selected' : '') + '>Sum (dollars, volume, counts)</option>'
+        + '<option value="average"' + (s.aggregation === 'average' ? ' selected' : '') + '>Average (rates, percentages)</option>'
+        + '</select></div>'
+        + '<div class="skc-inline">'
+        + '<div class="skc-row"><label>Prefix</label><input id="f-prefix" value="' + escapeHtml(s.valuePrefix) + '" placeholder="$"></div>'
+        + '<div class="skc-row"><label>Suffix</label><input id="f-suffix" value="' + escapeHtml(s.valueSuffix) + '" placeholder="%"></div>'
+        + '<div class="skc-row"><label>Decimals</label><input id="f-dec" type="number" min="0" max="4" value="' + s.decimals + '"></div>'
+        + '</div>'
+        + '<div class="skc-row skc-check"><input id="f-abbr" type="checkbox"' + (s.abbreviate ? ' checked' : '') + '><label style="text-transform:none;letter-spacing:0;">Abbreviate large numbers ($48.2K)</label></div>'
+        + '<div class="skc-row skc-check"><input id="f-partial" type="checkbox"' + (s.excludePartialWeek ? ' checked' : '') + '><label style="text-transform:none;letter-spacing:0;">Exclude current partial week (Mon start)</label></div>'
+        + '<div class="skc-row"><label>Comparison display</label><select id="f-cmp">'
+        + '<option value="auto"' + (s.comparisonDisplay === 'auto' ? ' selected' : '') + '>Auto (% for Sum, points for Average)</option>'
+        + '<option value="percent"' + (s.comparisonDisplay === 'percent' ? ' selected' : '') + '>Relative %</option>'
+        + '<option value="points"' + (s.comparisonDisplay === 'points' ? ' selected' : '') + '>Points / absolute</option>'
+        + '</select></div>'
+        + '<div class="skc-inline">'
+        + '<div class="skc-row"><label>Good direction</label><select id="f-dir">'
+        + '<option value="up"' + (s.positiveDirection === 'up' ? ' selected' : '') + '>Up is good</option>'
+        + '<option value="down"' + (s.positiveDirection === 'down' ? ' selected' : '') + '>Down is good</option>'
+        + '</select></div>'
+        + '<div class="skc-row"><label>Window (weeks)</label><input id="f-win" type="number" min="1" max="13" value="' + s.windowWeeks + '"></div>'
+        + '</div>'
+        + '<div class="skc-actions">'
+        + '<button class="skc-btn skc-btn-ghost" id="f-cancel">Cancel</button>'
+        + '<button class="skc-btn skc-btn-primary" id="f-save">Save</button>'
+        + '</div>'
+        + '</div>';
+
+      document.getElementById('f-cancel').onclick = function () { tableau.extensions.ui.closeDialog('cancel'); };
+      document.getElementById('f-save').onclick = async function () {
+        var st = tableau.extensions.settings;
+        st.set('title', document.getElementById('f-title').value);
+        st.set('aggregation', document.getElementById('f-agg').value);
+        st.set('valuePrefix', document.getElementById('f-prefix').value);
+        st.set('valueSuffix', document.getElementById('f-suffix').value);
+        st.set('decimals', document.getElementById('f-dec').value);
+        st.set('abbreviate', document.getElementById('f-abbr').checked ? 'true' : 'false');
+        st.set('excludePartialWeek', document.getElementById('f-partial').checked ? 'true' : 'false');
+        st.set('comparisonDisplay', document.getElementById('f-cmp').value);
+        st.set('positiveDirection', document.getElementById('f-dir').value);
+        st.set('windowWeeks', document.getElementById('f-win').value);
+        await st.saveAsync();
+        tableau.extensions.ui.closeDialog('saved');
+      };
+    }
+
+    // ---------- standalone demo (verification without Tableau) ----------
+    function renderDemo() {
+      document.body.style.cssText = 'margin:0;background:#f4f5f7;padding:24px;font-family:' + CCA.fonts.ui + ';';
+      app.innerHTML = '<div style="font-weight:600;font-size:14px;color:#555;margin-bottom:16px;">'
+        + 'Super KPI Card &mdash; standalone demo (sample weekly data)</div>'
+        + '<div id="demo-row" style="display:flex;gap:20px;flex-wrap:wrap;"></div>';
+      var row = document.getElementById('demo-row');
+      function host() { var d = document.createElement('div'); d.style.cssText = 'width:280px;height:200px;'; row.appendChild(d); return d; }
+      // 11 complete-week labels ending at the last fully-complete week, so the
+      // partial-week rule is a visible no-op here (the demo data is all complete weeks).
+      function demoWeeks(n) {
+        var last = CCA.mondayOf(new Date());
+        last.setDate(last.getDate() - 7);
+        var out = [];
+        for (var i = n - 1; i >= 0; i--) { var d = new Date(last); d.setDate(d.getDate() - i * 7); out.push(formatWeekLabel(d)); }
+        return out;
+      }
+      var noop = function () { console.log('[Super KPI Card] Settings open via the gear inside Tableau.'); };
+
+      renderCard(host(), {
+        title: 'Revenue',
+        values: [42000, 38500, 51200, 47800, 55100, 49300, 58200, 61000, 53400, 62100, 59800],
+        weeks: demoWeeks(11),
+        onConfigure: noop,
+        s: parseSettings({ title: 'Revenue', aggregation: 'sum', valuePrefix: '$', abbreviate: 'true', windowWeeks: '4' })
+      });
+      renderCard(host(), {
+        title: 'Packaging Efficiency',
+        values: [88, 91, 60, 95, 92, 94, 96, 93, 91, 95, 94],
+        weeks: demoWeeks(11),
+        onConfigure: noop,
+        s: parseSettings({ title: 'Packaging Efficiency', aggregation: 'average', valueSuffix: '%', decimals: '1', abbreviate: 'false', positiveDirection: 'up', windowWeeks: '4' })
+      });
+    }
+
+    // ---------- mode dispatch ----------
+    var params = new URLSearchParams(location.search);
+    var hasTableau = typeof tableau !== 'undefined' && tableau.extensions;
+    var inIframe = window.self !== window.top;   // Tableau hosts extensions + dialogs in an iframe
+    if (params.get('dialog') === '1' && hasTableau) {
+      initDialog();
+    } else if (params.get('demo') === '1') {
+      renderDemo();
+    } else if (hasTableau && inIframe) {
+      initViz();
+    } else {
+      renderDemo();
+    }
+  })();
+  </script>
+</body>
+</html>
