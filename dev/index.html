@@ -67,6 +67,7 @@
         comparisonDisplay: raw.comparisonDisplay || 'auto', // 'auto' | 'percent' | 'points'
         positiveDirection: raw.positiveDirection || 'up',
         maWindow: num(raw.maWindow, 4),
+        sparkHeight: num(raw.sparkHeight, 44),           // spark px height (per-card; width = card width)
         excludeIncomplete: bool(raw.excludeIncomplete != null ? raw.excludeIncomplete : raw.excludePartialWeek, true),
         // Names of the native Tableau parameters the card reads (user-driven controls).
         granularityParam: raw.granularityParam || 'Granularity',
@@ -178,7 +179,7 @@
         + '<div style="font-size:40px;font-weight:700;line-height:1.1;color:' + CCA.colors.neutralText + ';">'
         + formatValue(opts.primary, s) + '</div>'
         + renderDelta(delta, s)
-        + '<div style="margin-top:14px;">' + buildSpark(values, labels, colors, 240, 44, s) + '</div>'
+        + '<div style="margin-top:14px;">' + buildSpark(values, labels, colors, 240, s.sparkHeight, s) + '</div>'
         + '</div>';
       var gearEl = el.querySelector('.skc-gear');
       if (gearEl) gearEl.onclick = opts.onConfigure || function () {};
@@ -366,6 +367,7 @@
         + '<div class="skc-row"><label>Decimals</label><input id="f-dec" type="number" min="0" max="4" value="' + s.decimals + '"></div>'
         + '</div>'
         + '<div class="skc-row skc-check"><input id="f-abbr" type="checkbox"' + (s.abbreviate ? ' checked' : '') + '><label style="text-transform:none;letter-spacing:0;">Abbreviate large numbers ($48.2K)</label></div>'
+        + '<div class="skc-row"><label>Spark height (px) — taller shows more detail</label><input id="f-sparkh" type="number" min="20" max="160" value="' + s.sparkHeight + '"></div>'
         + '<div class="skc-row skc-check"><input id="f-partial" type="checkbox"' + (s.excludeIncomplete ? ' checked' : '') + '><label style="text-transform:none;letter-spacing:0;">Exclude current partial period</label></div>'
         + '<div class="skc-row"><label>Good direction</label><select id="f-dir">' + opt('up', s.positiveDirection, 'Up is good') + opt('down', s.positiveDirection, 'Down is good') + '</select></div>'
 
@@ -391,6 +393,7 @@
         st.set('valueSuffix', g('f-suffix').value);
         st.set('decimals', g('f-dec').value);
         st.set('abbreviate', g('f-abbr').checked ? 'true' : 'false');
+        st.set('sparkHeight', g('f-sparkh').value);
         st.set('excludeIncomplete', g('f-partial').checked ? 'true' : 'false');
         st.set('positiveDirection', g('f-dir').value);
         await st.saveAsync();
