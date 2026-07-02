@@ -250,12 +250,27 @@
         }
       }
       if (measIdx < 0 || dateIdx < 0) return { title: '', rows: [], hasDenom: false };
-      var rows = dt.data.map(function (r) {
-        var o = { date: new Date(r[dateIdx].value), value: Number(r[measIdx].value) };
-        if (denomIdx >= 0) o.denom = Number(r[denomIdx].value);
-        return o;
-      }).filter(function (x) { return !isNaN(x.value) && x.date && !isNaN(x.date.getTime()); });
-      return { title: cols[measIdx].fieldName, rows: rows, hasDenom: denomIdx >= 0 };
+      var isRatio = denomIdx >= 0;
+      function numOrNaN(cell) { var raw = cell && cell.value; return (raw == null) ? NaN : Number(raw); }
+      var rows = [];
+      dt.data.forEach(function (r) {
+        var date = new Date(r[dateIdx].value);
+        if (!date || isNaN(date.getTime())) return;
+        var v = numOrNaN(r[measIdx]);
+        if (isRatio) {
+          // Ratio mode: keep every day that has a denominator so the basis stays COMPLETE.
+          // A null/blank numerator (e.g. a day with no taproom volume) is 0 for that day — NOT a
+          // dropped row. Dropping it would also drop that day's denominator and inflate the rate
+          // (the "72% + 64% = 136%" bug: taproom's denominator was missing the street-only days).
+          var d = numOrNaN(r[denomIdx]);
+          if (isNaN(d)) return;
+          rows.push({ date: date, value: isNaN(v) ? 0 : v, denom: d });
+        } else {
+          if (isNaN(v)) return;
+          rows.push({ date: date, value: v });
+        }
+      });
+      return { title: cols[measIdx].fieldName, rows: rows, hasDenom: isRatio };
     }
 
     // Read the user's choices from native parameters (by configured name); fall back to gear defaults.
