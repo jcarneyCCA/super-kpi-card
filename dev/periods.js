@@ -1,10 +1,20 @@
-/* Period model — VENDORED plain-JS (to be mirrored into @cca/viz/utils/periods.ts).
+/* Period model — VENDORED plain-JS (mirrored from @cca/viz/utils/periods.ts).
  * The "brain" behind the Super KPI Card's flexible comparisons: takes day-grain
- * rows + the user's choices (granularity / window length / comparison mode) and
- * returns the bucketed series plus the primary and comparison aggregates.
+ * rows + the user's choices (granularity / window length / comparison mode /
+ * aggregation) and returns the bucketed series plus the primary and comparison
+ * aggregates.
+ *
+ * Aggregation modes:
+ *   sum      — additive measures (volume, $, counts). Window = Σ bucket values.
+ *   average  — simple mean of bucket values (rates already equal-weighted).
+ *   ratio    — aggregated percent / rate-of-sums. Each row carries {value=numerator,
+ *              denom=denominator}; a bucket = Σnum/Σden; the window = Σnum/Σden pooled
+ *              across its buckets (TRUE volume-weighted ratio, never a mean of ratios).
+ *              This is what makes "% of total" metrics correct in the card.
  *
  * Framework-agnostic and portable — the same logic travels to Brewery Brain.
  * Weeks are Monday-start (Mon–Sun); months are calendar months.
+ * KEEP IN SYNC with @cca/viz/utils/periods.ts.
  */
 (function (global) {
   function startOfDay(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
@@ -23,25 +33,28 @@
       ? start.toLocaleDateString(undefined, { month: 'short', year: 'numeric' })      // "Jun 2026"
       : 'Week of ' + start.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); // "Week of Jun 9"
   }
+  function sum(vals) { return vals.reduce(function (a, b) { return a + b; }, 0); }
   function aggregate(vals, agg) {
     if (!vals.length) return 0;
-    var s = vals.reduce(function (a, b) { return a + b; }, 0);
+    var s = sum(vals);
     return agg === 'average' ? s / vals.length : s;
   }
 
   /**
-   * rows: [{ date: Date, value: number }] at any grain (day-level recommended).
+   * rows: [{ date: Date, value: number, denom?: number }] at any grain (day-level recommended).
+   *       `denom` is only read in ratio mode (value = numerator).
    * opts: { unit:'week'|'month', primaryLen, comparisonMode:'prior'|'yoy',
-   *         agg:'sum'|'average', excludeIncomplete=true, asOf?:Date }
-   * → { unit, values:[], labels:[], primary, comparison }   (comparison null if no history)
+   *         agg:'sum'|'average'|'ratio', excludeIncomplete=true, asOf?:Date }
+   * → { unit, values:[], labels:[], primary, comparison, roles }   (comparison null if no history)
    */
   function resolvePeriods(rows, opts) {
     var unit = opts.unit === 'month' ? 'month' : 'week';
     var primaryLen = Math.max(1, opts.primaryLen || 1);
     var mode = opts.comparisonMode === 'yoy' ? 'yoy' : 'prior';
-    var agg = opts.agg === 'average' ? 'average' : 'sum';
+    var agg = opts.agg === 'average' ? 'average' : (opts.agg === 'ratio' ? 'ratio' : 'sum');
     var excludeIncomplete = opts.excludeIncomplete !== false;
     var asOf = opts.asOf ? new Date(opts.asOf) : new Date();
+    var isRatio = agg === 'ratio';
 
     // Bucket the rows into Monday-weeks or calendar-months.
     var map = {};
@@ -49,11 +62,17 @@
       if (!r.date || isNaN(r.date.getTime())) return;
       var start = bucketStart(r.date, unit);
       var k = keyOf(start);
-      if (!map[k]) map[k] = { start: start, vals: [] };
+      if (!map[k]) map[k] = { start: start, vals: [], denoms: [] };
       map[k].vals.push(r.value);
+      if (isRatio) map[k].denoms.push(r.denom != null ? r.denom : 0);
     });
     var buckets = Object.keys(map).map(function (k) {
-      return { start: map[k].start, value: aggregate(map[k].vals, agg) };
+      var b = map[k];
+      if (isRatio) {
+        var num = sum(b.vals), den = sum(b.denoms);
+        return { start: b.start, value: den !== 0 ? num / den : 0, num: num, den: den };
+      }
+      return { start: b.start, value: aggregate(b.vals, agg) };
     }).sort(function (a, b) { return a.start - b.start; });
 
     // Complete-period rule: drop the current in-progress bucket (and any future).
@@ -66,7 +85,6 @@
     var primStart = Math.max(0, n - primaryLen);
     var primaryIdx = [];
     for (var pi = primStart; pi < n; pi++) primaryIdx.push(pi);
-    var primary = aggregate(primaryIdx.map(function (i) { return buckets[i].value; }), agg);
 
     var comparisonIdx = [];
     if (mode === 'prior') {
@@ -86,9 +104,20 @@
         if (j != null) comparisonIdx.push(j);
       });
     }
-    var comparison = comparisonIdx.length
-      ? aggregate(comparisonIdx.map(function (i) { return buckets[i].value; }), agg)
-      : null;
+
+    // Window aggregate. Ratio pools numerator/denominator across the window's buckets
+    // (Σnum/Σden) — the volume-weighted rate. Sum/average keep their prior behaviour
+    // (aggregate of the per-bucket values), byte-for-byte unchanged.
+    function windowAgg(idxs) {
+      if (isRatio) {
+        var num = 0, den = 0;
+        idxs.forEach(function (i) { num += buckets[i].num; den += buckets[i].den; });
+        return den !== 0 ? num / den : 0;
+      }
+      return aggregate(idxs.map(function (i) { return buckets[i].value; }), agg);
+    }
+    var primary = windowAgg(primaryIdx);
+    var comparison = comparisonIdx.length ? windowAgg(comparisonIdx) : null;
 
     // Per-bucket role so the card can highlight the two compared windows.
     var roles = buckets.map(function () { return 'context'; });

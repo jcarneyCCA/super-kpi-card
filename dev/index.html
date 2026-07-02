@@ -63,6 +63,7 @@
         valueSuffix: raw.valueSuffix || '',
         decimals: num(raw.decimals, 0),
         abbreviate: bool(raw.abbreviate, true),
+        asPercent: bool(raw.asPercent, false),          // ratio/rate → show value ×100 with %
         comparisonDisplay: raw.comparisonDisplay || 'auto', // 'auto' | 'percent' | 'points'
         positiveDirection: raw.positiveDirection || 'up',
         maWindow: num(raw.maWindow, 4),
@@ -86,6 +87,10 @@
       return v.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
     }
     function formatValue(v, s) {
+      if (s.asPercent) {
+        var pdec = s.decimals != null ? s.decimals : 1;
+        return (v * 100).toLocaleString(undefined, { minimumFractionDigits: pdec, maximumFractionDigits: pdec }) + '%';
+      }
       var core = s.abbreviate
         ? abbreviateNum(v, s.decimals)
         : v.toLocaleString(undefined, { minimumFractionDigits: s.decimals, maximumFractionDigits: s.decimals });
@@ -100,8 +105,12 @@
     // ---------- comparison display ----------
     function computeDelta(primary, comparison, s) {
       if (comparison == null) return null;
+      if (s.asPercent) {
+        // Percentage-point change (×100), e.g. 67.2% vs 69.8% → −2.6 pts.
+        return { kind: 'points', value: (primary - comparison) * 100, pct: true };
+      }
       var mode = s.comparisonDisplay;
-      if (mode === 'auto') mode = s.aggregation === 'average' ? 'points' : 'percent';
+      if (mode === 'auto') mode = (s.aggregation === 'average' || s.aggregation === 'ratio') ? 'points' : 'percent';
       if (mode === 'percent') {
         return { kind: 'percent', value: comparison !== 0 ? (primary - comparison) / Math.abs(comparison) * 100 : null };
       }
@@ -118,7 +127,7 @@
         txt = (isPos ? '+' : '') + delta.value.toFixed(1) + '%';
       } else {
         var mag = Math.abs(delta.value);
-        var magStr = (s.valueSuffix === '%')
+        var magStr = (delta.pct || s.valueSuffix === '%')
           ? mag.toFixed(s.decimals > 0 ? s.decimals : 1) + ' pts'
           : formatValue(mag, { valuePrefix: s.valuePrefix, valueSuffix: s.valueSuffix, decimals: s.decimals, abbreviate: s.abbreviate });
         txt = (isPos ? '+' : '−') + magStr;
@@ -213,7 +222,7 @@
     // Day-level series: one row per date at whatever grain is on the shelf (DAY recommended).
     // resolvePeriods does the bucketing — so the card never pre-aggregates here.
     async function loadSeries() {
-      var measureName = null, dateName = null;
+      var measureName = null, dateName = null, denomName = null;
       try {
         var spec = await worksheet.getVisualSpecificationAsync();
         var marks = spec.marksSpecifications || [];
@@ -222,14 +231,16 @@
           var fname = e.field && (e.field.name || e.field.fieldName || e.fieldName);
           if (e.id === 'measure') measureName = fname;
           if (e.id === 'date') dateName = fname;
+          if (e.id === 'denominator') denomName = fname;   // ratio-mode basis (optional shelf)
         });
       } catch (err) { /* fall back to column dataType below */ }
 
       var dt = await worksheet.getSummaryDataAsync({ maxRows: 20000, ignoreSelection: true });
-      var cols = dt.columns, dateIdx = -1, measIdx = -1;
+      var cols = dt.columns, dateIdx = -1, measIdx = -1, denomIdx = -1;
       for (var i = 0; i < cols.length; i++) {
         if (measureName && cols[i].fieldName === measureName) measIdx = i;
         if (dateName && cols[i].fieldName === dateName) dateIdx = i;
+        if (denomName && cols[i].fieldName === denomName) denomIdx = i;
       }
       if (measIdx < 0 || dateIdx < 0) {
         for (var j = 0; j < cols.length; j++) {
@@ -238,11 +249,13 @@
           if (measIdx < 0 && (t === 'float' || t === 'int')) measIdx = j;
         }
       }
-      if (measIdx < 0 || dateIdx < 0) return { title: '', rows: [] };
+      if (measIdx < 0 || dateIdx < 0) return { title: '', rows: [], hasDenom: false };
       var rows = dt.data.map(function (r) {
-        return { date: new Date(r[dateIdx].value), value: Number(r[measIdx].value) };
+        var o = { date: new Date(r[dateIdx].value), value: Number(r[measIdx].value) };
+        if (denomIdx >= 0) o.denom = Number(r[denomIdx].value);
+        return o;
       }).filter(function (x) { return !isNaN(x.value) && x.date && !isNaN(x.date.getTime()); });
-      return { title: cols[measIdx].fieldName, rows: rows };
+      return { title: cols[measIdx].fieldName, rows: rows, hasDenom: denomIdx >= 0 };
     }
 
     // Read the user's choices from native parameters (by configured name); fall back to gear defaults.
@@ -273,6 +286,10 @@
       try {
         var choice = await readPeriodChoices(s);
         var data = await loadSeries();
+        if (s.aggregation === 'ratio' && !data.hasDenom) {
+          app.innerHTML = '<div class="skc-msg">Ratio mode needs a denominator.<br>Add a field to the “Denominator (basis)” shelf.</div>';
+          return;
+        }
         var resolved = CCA.resolvePeriods(data.rows, {
           unit: choice.unit, primaryLen: choice.primaryLen, comparisonMode: choice.mode,
           agg: s.aggregation, excludeIncomplete: s.excludeIncomplete
@@ -325,7 +342,9 @@
         + '</div>'
 
         + '<h3>Format</h3>'
-        + '<div class="skc-row"><label>Aggregation</label><select id="f-agg">' + opt('sum', s.aggregation, 'Sum (dollars, volume, counts)') + opt('average', s.aggregation, 'Average (rates, percentages)') + '</select></div>'
+        + '<div class="skc-row"><label>Aggregation</label><select id="f-agg">' + opt('sum', s.aggregation, 'Sum (dollars, volume, counts)') + opt('average', s.aggregation, 'Average (simple mean)') + opt('ratio', s.aggregation, 'Ratio — sum ÷ sum (% of total, rates)') + '</select></div>'
+        + '<div class="skc-row skc-check"><input id="f-pct" type="checkbox"' + (s.asPercent ? ' checked' : '') + '><label style="text-transform:none;letter-spacing:0;">Show as percent (×100, appends %)</label></div>'
+        + '<div class="skc-row" style="font-size:10.5px;color:#999;margin-top:-2px;">Ratio mode uses the <b>Denominator (basis)</b> shelf on the Marks card as the divisor.</div>'
         + '<div class="skc-inline">'
         + '<div class="skc-row"><label>Prefix</label><input id="f-prefix" value="' + escapeHtml(s.valuePrefix) + '" placeholder="$"></div>'
         + '<div class="skc-row"><label>Suffix</label><input id="f-suffix" value="' + escapeHtml(s.valueSuffix) + '" placeholder="%"></div>'
@@ -352,6 +371,7 @@
         st.set('primaryLen', g('f-len').value);
         st.set('comparisonMode', g('f-mode').value);
         st.set('aggregation', g('f-agg').value);
+        st.set('asPercent', g('f-pct').checked ? 'true' : 'false');
         st.set('valuePrefix', g('f-prefix').value);
         st.set('valueSuffix', g('f-suffix').value);
         st.set('decimals', g('f-dec').value);
@@ -394,6 +414,18 @@
       demoCard('Revenue · Weekly (4 wk)', { unit: 'week', primaryLen: 4, comparisonMode: 'prior' });
       demoCard('Revenue · Monthly', { unit: 'month', primaryLen: 1, comparisonMode: 'prior' });
       demoCard('Revenue · Month vs LY', { unit: 'month', primaryLen: 1, comparisonMode: 'yoy' });
+
+      // Ratio-mode demo: street share of daily volume (numerator=street CE, denom=total CE), shown as %.
+      var ratioRows = rows.map(function (x, i) {
+        var share = 0.55 + 0.18 * Math.sin(i / 20);
+        return { date: x.date, value: Math.round(x.value * share), denom: x.value };
+      });
+      (function () {
+        var rr = CCA.resolvePeriods(ratioRows, { unit: 'month', primaryLen: 1, comparisonMode: 'prior', agg: 'ratio', excludeIncomplete: true });
+        var s = parseSettings({ title: 'Street Mix · Ratio %', aggregation: 'ratio', asPercent: 'true', decimals: '1' });
+        s._compLabel = 'prior period';
+        renderCard(host(), { title: 'Street Mix · Ratio %', primary: rr.primary, comparison: rr.comparison, values: rr.values, labels: rr.labels, roles: rr.roles, s: s, onConfigure: noop });
+      })();
     }
 
     // ---------- mode dispatch ----------
